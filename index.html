@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>스코어카드</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#fafaf7">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="스코어카드">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;700&family=DM+Mono:wght@400;500&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
 <style>
@@ -697,9 +705,21 @@ const DEFAULT_PARS_9  = [4,4,3,4,5,3,4,4,5];
 // ═══════════════════════════════════════════
 // API
 // ═══════════════════════════════════════════
+// Give up on the server quickly so a weak signal never stalls the app;
+// callers fall back to localStorage when this throws.
+async function apiFetch(url, options = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3000);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchRounds() {
   try {
-    const res = await fetch('/api/rounds');
+    const res = await apiFetch('/api/rounds');
     const data = await res.json();
     state.rounds = data.rounds || [];
   } catch(e) {
@@ -709,7 +729,7 @@ async function fetchRounds() {
 
 async function saveRound(round) {
   try {
-    const res = await fetch('/api/rounds', {
+    const res = await apiFetch('/api/rounds', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(round)
@@ -794,7 +814,7 @@ function esc(s) {
 
 async function deleteRound(id) {
   try {
-    await fetch('/api/rounds/'+id, { method: 'DELETE' });
+    await apiFetch('/api/rounds/'+id, { method: 'DELETE' });
   } catch(e) {}
   state.rounds = state.rounds.filter(r => r.id !== id);
   localStorage.setItem('rounds', JSON.stringify(state.rounds));
@@ -1650,6 +1670,17 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') autoSaveCurrent();
 });
 window.addEventListener('pagehide', autoSaveCurrent);
+
+// Offline support: cache the app on the phone so it opens without data
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
+// Ask the browser not to clear saved rounds when storage runs low
+if (navigator.storage && navigator.storage.persist) {
+  navigator.storage.persist().catch(() => {});
+}
 
 init();
 </script>
