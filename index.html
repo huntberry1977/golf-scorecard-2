@@ -1569,7 +1569,95 @@ function renderSettings() {
           `<button type="button" class="player-chip" onclick="addSuggestedProfile(${i})">+ ${esc(p)}</button>`
         ).join('')}</div>
       </div>
-    </div>` : ''}`;
+    </div>` : ''}
+    <div class="card">
+      <div class="card-header"><h3>기록 백업</h3></div>
+      <div class="card-body">
+        <p class="form-hint">기록은 이 폰에만 저장돼요. 가끔 파일로 내보내서 카톡·메일·드라이브 등에 보관해두세요.<br>
+          현재 라운드 ${state.rounds.length}개 · 플레이어 ${state.players.length}명</p>
+        <div class="flex gap-8">
+          <button class="btn btn-outline btn-sm" style="flex:1" onclick="exportBackup()">내보내기</button>
+          <button class="btn btn-outline btn-sm" style="flex:1" onclick="document.getElementById('inp-backup').click()">가져오기</button>
+        </div>
+        <input type="file" id="inp-backup" accept=".json,application/json" style="display:none" onchange="importBackup(this)">
+        <p class="form-hint" style="margin-top:8px;margin-bottom:0">가져오기는 기존 기록에 합쳐요. 이미 있는 라운드는 건너뛰어요.</p>
+      </div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════
+// BACKUP (export / import)
+// ═══════════════════════════════════════════
+async function exportBackup() {
+  const data = {
+    app: 'golf-scorecard',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    rounds: state.rounds,
+    players: state.players
+  };
+  const name = `golf-backup-${new Date().toISOString().slice(0,10)}.json`;
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const file = new File([blob], name, { type: 'application/json' });
+
+  // Phones: open the share sheet (KakaoTalk, mail, Drive, Files...)
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: '골프 스코어카드 백업' });
+      return;
+    } catch(e) {
+      if (e.name === 'AbortError') return;  // user closed the share sheet
+    }
+  }
+  // Otherwise download the file
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast('백업 파일을 저장했어요');
+}
+
+function isValidRound(r) {
+  return r && typeof r.id === 'string' && Array.isArray(r.players) && Array.isArray(r.holeData)
+    && r.holeData.every(h => h && typeof h.par === 'number' && h.scores && typeof h.scores === 'object');
+}
+
+async function importBackup(input) {
+  const file = input.files[0];
+  input.value = '';  // allow picking the same file again
+  if (!file) return;
+
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch(e) {
+    showToast('백업 파일을 읽을 수 없어요');
+    return;
+  }
+  if (!data || !Array.isArray(data.rounds)) {
+    showToast('스코어카드 백업 파일이 아니에요');
+    return;
+  }
+
+  const existing = new Set(state.rounds.map(r => r.id));
+  const newRounds = data.rounds.filter(r => isValidRound(r) && !existing.has(r.id));
+  const skipped = data.rounds.length - newRounds.length;
+  for (const r of newRounds) await saveRound(r);
+
+  const newPlayers = (Array.isArray(data.players) ? data.players : [])
+    .filter(p => typeof p === 'string' && p.trim() && !state.players.includes(p.trim()))
+    .map(p => p.trim());
+  if (newPlayers.length) {
+    state.players.push(...new Set(newPlayers));
+    savePlayers();
+  }
+
+  renderSettings();
+  showToast(`라운드 ${newRounds.length}개 추가` + (skipped ? ` · ${skipped}개 건너뜀` : ''));
 }
 
 function registerProfile(name) {
