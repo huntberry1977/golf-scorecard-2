@@ -1,0 +1,12 @@
+{
+  "name": "golf-scorecard",
+  "version": "1.0.0",
+  "description": "골프 스코어카드 앱",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
