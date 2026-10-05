@@ -196,6 +196,24 @@
     color: var(--teal);
     font-weight: 300;
   }
+  .player-chip {
+    background: #fff;
+    border: 1.5px solid var(--line);
+    border-radius: 20px;
+    padding: 6px 14px;
+    font-family: 'Noto Serif KR', serif;
+    font-size: 13px;
+    color: var(--ink-mid);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .player-chip.selected {
+    background: var(--teal);
+    border-color: var(--teal-dark);
+    color: #fff;
+    font-weight: 600;
+  }
+  .form-hint { font-size: 12px; color: var(--ink-light); line-height: 1.6; margin-bottom: 8px; }
   .add-player-row { display: flex; gap: 8px; margin-top: 8px; }
   .add-player-row .form-input { flex: 1; }
 
@@ -626,6 +644,7 @@
   <div class="nav-tab active" onclick="showScreen('home')">홈</div>
   <div class="nav-tab" onclick="showScreen('round')">라운드</div>
   <div class="nav-tab" onclick="showScreen('stats')">통계</div>
+  <div class="nav-tab" onclick="showScreen('settings')">설정</div>
 </div>
 
 <!-- ───────────── HOME ───────────── -->
@@ -641,6 +660,11 @@
 <!-- ───────────── STATS ───────────── -->
 <div id="screen-stats" class="screen pb-safe">
   <div id="stats-content"></div>
+</div>
+
+<!-- ───────────── SETTINGS ───────────── -->
+<div id="screen-settings" class="screen pb-safe">
+  <div id="settings-content"></div>
 </div>
 
 <!-- ───────────── MODAL ───────────── -->
@@ -661,7 +685,9 @@ let state = {
   rounds: [],
   currentRound: null,  // round being scored
   currentHole: 0,
-  activeScreen: 'home'
+  activeScreen: 'home',
+  players: [],         // registered player profiles (names)
+  statsPlayer: null    // player whose stats are shown
 };
 
 const PAR_LABELS = { 3: 'Par 3', 4: 'Par 4', 5: 'Par 5' };
@@ -703,7 +729,8 @@ async function saveRound(round) {
 // ═══════════════════════════════════════════
 // IN-PROGRESS ROUND AUTOSAVE
 // ═══════════════════════════════════════════
-const CURRENT_ROUND_KEY = 'currentRound';
+const CURRENT_ROUND_KEY = 'golf_current_round';
+const LEGACY_CURRENT_ROUND_KEY = 'currentRound';  // key used before the rename
 
 function autoSaveCurrent() {
   try {
@@ -719,22 +746,50 @@ function autoSaveCurrent() {
 }
 
 function clearCurrentSave() {
-  try { localStorage.removeItem(CURRENT_ROUND_KEY); } catch(e) {}
+  try {
+    localStorage.removeItem(CURRENT_ROUND_KEY);
+    localStorage.removeItem(LEGACY_CURRENT_ROUND_KEY);
+  } catch(e) {}
 }
 
 function restoreCurrent() {
   try {
-    const saved = JSON.parse(localStorage.getItem(CURRENT_ROUND_KEY) || 'null');
+    const raw = localStorage.getItem(CURRENT_ROUND_KEY) || localStorage.getItem(LEGACY_CURRENT_ROUND_KEY);
+    localStorage.removeItem(LEGACY_CURRENT_ROUND_KEY);
+    const saved = JSON.parse(raw || 'null');
     if (!saved || !saved.round || saved.round.finished) return false;
     state.currentRound = saved.round;
     state.currentHole = Math.min(Math.max(0, saved.hole || 0), saved.round.holes - 1);
     // A resumed round is removed from the list while being scored
     state.rounds = state.rounds.filter(r => r.id !== saved.round.id);
+    autoSaveCurrent();  // re-save under the current key (migrates legacy data)
     return true;
   } catch(e) {
     clearCurrentSave();
     return false;
   }
+}
+
+// ═══════════════════════════════════════════
+// PLAYER PROFILES
+// ═══════════════════════════════════════════
+const PLAYERS_KEY = 'golf_players';
+
+function loadPlayers() {
+  try {
+    const list = JSON.parse(localStorage.getItem(PLAYERS_KEY) || '[]');
+    state.players = Array.isArray(list) ? list.filter(p => typeof p === 'string' && p.trim()) : [];
+  } catch(e) {
+    state.players = [];
+  }
+}
+
+function savePlayers() {
+  try { localStorage.setItem(PLAYERS_KEY, JSON.stringify(state.players)); } catch(e) {}
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 }
 
 async function deleteRound(id) {
@@ -752,7 +807,7 @@ function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('screen-'+name).classList.add('active');
-  const tabs = ['home','round','stats'];
+  const tabs = ['home','round','stats','settings'];
   document.querySelectorAll('.nav-tab')[tabs.indexOf(name)].classList.add('active');
   state.activeScreen = name;
   renderScreen(name);
@@ -762,6 +817,7 @@ function renderScreen(name) {
   if (name === 'home') renderHome();
   if (name === 'round') renderRound();
   if (name === 'stats') renderStats();
+  if (name === 'settings') renderSettings();
 }
 
 // ═══════════════════════════════════════════
@@ -842,8 +898,11 @@ function roundItemHTML(r) {
 // NEW ROUND SETUP
 // ═══════════════════════════════════════════
 function startNewRound() {
+  tempPlayers = [];
+  tempHandicaps = {};
   document.getElementById('modal-content').innerHTML = newRoundFormHTML();
   document.getElementById('modal-overlay').classList.add('open');
+  renderPlayerList();
 }
 
 function newRoundFormHTML() {
@@ -867,11 +926,14 @@ function newRoundFormHTML() {
     </div>
     <div class="form-group">
       <label class="form-label">참여자</label>
-      <div class="player-list" id="player-list"></div>
+      ${state.players.length
+        ? `<div class="player-list" id="profile-chips"></div>`
+        : `<p class="form-hint">설정 탭에서 플레이어를 등록해두면 여기서 바로 선택할 수 있어요.</p>`}
       <div class="add-player-row">
-        <input class="form-input" id="inp-player" placeholder="이름 입력" type="text" onkeydown="if(event.key==='Enter')addPlayer()">
+        <input class="form-input" id="inp-player" placeholder="${state.players.length ? '게스트 이름 입력' : '이름 입력'}" type="text" onkeydown="if(event.key==='Enter')addPlayer()">
         <button class="btn btn-outline btn-sm" onclick="addPlayer()">추가</button>
       </div>
+      <div class="player-list" id="player-list"></div>
     </div>
     <div class="form-group">
       <label class="form-label">핸디캡 설정 <span style="color:var(--ink-light);font-size:10px">(선택)</span></label>
@@ -882,6 +944,7 @@ function newRoundFormHTML() {
 }
 
 let tempPlayers = [];
+let tempHandicaps = {};  // name -> entered handicap, kept across list re-renders
 
 function addPlayer() {
   const inp = document.getElementById('inp-player');
@@ -892,23 +955,36 @@ function addPlayer() {
   renderPlayerList();
 }
 
-function removePlayer(name) {
-  tempPlayers = tempPlayers.filter(p => p !== name);
+function removePlayer(i) {
+  tempPlayers.splice(i, 1);
+  renderPlayerList();
+}
+
+function toggleProfile(i) {
+  const name = state.players[i];
+  if (tempPlayers.includes(name)) tempPlayers = tempPlayers.filter(p => p !== name);
+  else tempPlayers.push(name);
   renderPlayerList();
 }
 
 function renderPlayerList() {
+  const chips = document.getElementById('profile-chips');
+  if (chips) {
+    chips.innerHTML = state.players.map((p, i) =>
+      `<button type="button" class="player-chip ${tempPlayers.includes(p) ? 'selected' : ''}" onclick="toggleProfile(${i})">${esc(p)}</button>`
+    ).join('');
+  }
   const list = document.getElementById('player-list');
   if (!list) return;
-  list.innerHTML = tempPlayers.map(p =>
-    `<div class="player-tag">${p}<span class="remove" onclick="removePlayer('${p}')">×</span></div>`
+  list.innerHTML = tempPlayers.map((p, i) =>
+    `<div class="player-tag">${esc(p)}<span class="remove" onclick="removePlayer(${i})">×</span></div>`
   ).join('');
   const hcList = document.getElementById('handicap-list');
   if (hcList) {
-    hcList.innerHTML = tempPlayers.map(p =>
+    hcList.innerHTML = tempPlayers.map((p, i) =>
       `<div class="handicap-row">
-        <div class="handicap-name">${p}</div>
-        <input class="handicap-input" id="hc-${p}" type="number" placeholder="0" min="0" max="54">
+        <div class="handicap-name">${esc(p)}</div>
+        <input class="handicap-input" type="number" placeholder="0" min="0" max="54" value="${esc(tempHandicaps[p] ?? '')}" oninput="tempHandicaps[tempPlayers[${i}]] = this.value">
       </div>`
     ).join('');
   }
@@ -923,8 +999,7 @@ function confirmNewRound() {
 
   const handicaps = {};
   tempPlayers.forEach(p => {
-    const hc = document.getElementById('hc-'+p);
-    handicaps[p] = hc ? parseInt(hc.value) || 0 : 0;
+    handicaps[p] = parseInt(tempHandicaps[p]) || 0;
   });
 
   const defaultPars = holes === 18 ? DEFAULT_PARS_18 : DEFAULT_PARS_9;
@@ -1306,8 +1381,23 @@ function renderStats() {
     return;
   }
 
-  const allTotals = finished.map(r => ({ r, t: calcRoundTotals(r) }));
-  const mainPlayer = finished[0].players[0];
+  // Stats are accumulated by player name across all rounds.
+  // Registered players come first, then other names by number of rounds.
+  const roundCounts = {};
+  finished.forEach(r => r.players.forEach(p => roundCounts[p] = (roundCounts[p] || 0) + 1));
+  statsPlayerOptions = [
+    ...state.players.filter(p => roundCounts[p]),
+    ...Object.keys(roundCounts).filter(p => !state.players.includes(p)).sort((a,b) => roundCounts[b] - roundCounts[a])
+  ];
+  if (!statsPlayerOptions.includes(state.statsPlayer)) state.statsPlayer = statsPlayerOptions[0];
+  const mainPlayer = state.statsPlayer;
+  const myRounds = finished.filter(r => r.players.includes(mainPlayer));
+  const allTotals = myRounds.map(r => ({ r, t: calcRoundTotals(r, mainPlayer) }));
+  const playerPicker = statsPlayerOptions.length > 1
+    ? `<div class="player-list" style="margin:0 0 16px">${statsPlayerOptions.map((p, i) =>
+        `<button type="button" class="player-chip ${p === mainPlayer ? 'selected' : ''}" onclick="selectStatsPlayer(${i})">${esc(p)}</button>`
+      ).join('')}</div>`
+    : '';
 
   const scores = allTotals.map(x => x.t.playerScores[mainPlayer]?.total || 0).filter(s => s > 0);
   const avgScore = scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length) : 0;
@@ -1333,7 +1423,7 @@ function renderStats() {
 
   // Result distribution
   const dist = { eagle: 0, birdie: 0, par: 0, bogey: 0, double: 0 };
-  finished.forEach(r => {
+  myRounds.forEach(r => {
     r.holeData.forEach(h => {
       const s = h.scores[mainPlayer];
       if (!s || !s.strokes) return;
@@ -1348,7 +1438,8 @@ function renderStats() {
   const totalHoles = Object.values(dist).reduce((a,b)=>a+b,0);
 
   el.innerHTML = `
-    <div class="section-title">전체 ${finished.length}라운드 평균 (${mainPlayer})</div>
+    ${playerPicker}
+    <div class="section-title">전체 ${myRounds.length}라운드 평균 (${esc(mainPlayer)})</div>
     <div class="stat-grid">
       <div class="stat-card highlight">
         <div class="stat-val">${avgScore}</div>
@@ -1371,7 +1462,7 @@ function renderStats() {
         <div class="stat-label">평균 퍼팅/홀</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val">${finished.length}</div>
+        <div class="stat-val">${myRounds.length}</div>
         <div class="stat-label">총 라운드</div>
       </div>
     </div>
@@ -1410,14 +1501,86 @@ function renderStats() {
     </div>
 
     <div class="section-title" style="margin-top:4px">라운드 목록</div>
-    ${finished.map(r => roundItemHTML(r)).join('')}
+    ${myRounds.map(r => roundItemHTML(r)).join('')}
   `;
+}
+
+let statsPlayerOptions = [];
+
+function selectStatsPlayer(i) {
+  state.statsPlayer = statsPlayerOptions[i];
+  renderStats();
+}
+
+// ═══════════════════════════════════════════
+// SETTINGS SCREEN
+// ═══════════════════════════════════════════
+let profileSuggestions = [];
+
+function renderSettings() {
+  const el = document.getElementById('settings-content');
+  // Names used in past rounds that aren't registered yet
+  profileSuggestions = [...new Set(state.rounds.flatMap(r => r.players))].filter(p => !state.players.includes(p));
+
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-header"><h3>플레이어 등록</h3></div>
+      <div class="card-body">
+        <p class="form-hint">등록한 이름은 새 라운드에서 바로 선택할 수 있어요. 같은 이름의 기록은 통계에 함께 모여요.</p>
+        <div class="add-player-row">
+          <input class="form-input" id="inp-profile" placeholder="이름 입력" type="text" onkeydown="if(event.key==='Enter')addProfile()">
+          <button class="btn btn-outline btn-sm" onclick="addProfile()">추가</button>
+        </div>
+        ${state.players.length
+          ? `<div style="margin-top:12px">${state.players.map((p, i) => `
+              <div class="handicap-row">
+                <div class="handicap-name">${esc(p)}</div>
+                <button class="btn btn-danger btn-sm" onclick="removeProfile(${i})">삭제</button>
+              </div>`).join('')}</div>`
+          : `<p class="form-hint" style="margin-top:12px">아직 등록된 플레이어가 없어요.</p>`}
+      </div>
+    </div>
+    ${profileSuggestions.length ? `
+    <div class="card">
+      <div class="card-header"><h3>기존 기록의 이름</h3></div>
+      <div class="card-body">
+        <p class="form-hint">눌러서 바로 등록할 수 있어요.</p>
+        <div class="player-list">${profileSuggestions.map((p, i) =>
+          `<button type="button" class="player-chip" onclick="addSuggestedProfile(${i})">+ ${esc(p)}</button>`
+        ).join('')}</div>
+      </div>
+    </div>` : ''}`;
+}
+
+function registerProfile(name) {
+  name = name.trim();
+  if (!name) return;
+  if (state.players.includes(name)) { showToast('이미 등록된 이름이에요'); return; }
+  state.players.push(name);
+  savePlayers();
+  renderSettings();
+}
+
+function addProfile() {
+  registerProfile(document.getElementById('inp-profile').value);
+}
+
+function addSuggestedProfile(i) {
+  registerProfile(profileSuggestions[i]);
+}
+
+function removeProfile(i) {
+  // Only removes the profile; past round records and stats are kept
+  state.players.splice(i, 1);
+  savePlayers();
+  renderSettings();
 }
 
 // ═══════════════════════════════════════════
 // CALC
 // ═══════════════════════════════════════════
-function calcRoundTotals(r) {
+// FW/GIR/putts are computed for `player` (defaults to the round's first player)
+function calcRoundTotals(r, player = r.players[0]) {
   let par = 0, fwHits = 0, fwTotal = 0, girHits = 0, totalPutts = 0;
   const playerScores = {};
   r.players.forEach(p => playerScores[p] = { total: 0, holes: 0 });
@@ -1431,7 +1594,7 @@ function calcRoundTotals(r) {
         playerScores[p].total += s.strokes;
         playerScores[p].holes++;
       }
-      if (p === r.players[0]) {
+      if (p === player) {
         if (s.fw && h.par !== 3) fwHits++;
         if (s.gir) girHits++;
         totalPutts += s.putts || 0;
@@ -1442,7 +1605,7 @@ function calcRoundTotals(r) {
   const filledHoles = r.holeData.filter(h => r.players.some(p => h.scores[p].strokes > 0)).length || 1;
   return {
     par,
-    score: playerScores[r.players[0]]?.total || 0,
+    score: playerScores[player]?.total || 0,
     playerScores,
     fwHits, fwTotal,
     fw: fwTotal ? Math.round(fwHits/fwTotal*100) : 0,
@@ -1473,6 +1636,7 @@ function showToast(msg) {
 // ═══════════════════════════════════════════
 async function init() {
   await fetchRounds();
+  loadPlayers();
   if (restoreCurrent()) {
     showScreen('round');
     showToast('진행 중인 라운드를 복구했습니다');
