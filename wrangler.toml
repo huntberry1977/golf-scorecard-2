@@ -1,0 +1,6 @@
+name = "qg-golf-course-search"
+main = "cloudflare-worker.js"
+compatibility_date = "2026-11-13"
+
+[vars]
+ALLOWED_ORIGIN = "https://huntberry1977.github.io"

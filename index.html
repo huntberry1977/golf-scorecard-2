@@ -512,6 +512,25 @@
   }
   .course-map-viewer.open { display: flex; }
   .course-map-viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .course-map-search-results { display: grid; gap: 10px; margin-top: 12px; }
+  .course-map-search-result {
+    display: grid;
+    grid-template-columns: 76px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    padding: 8px;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+  .course-map-search-result img {
+    width: 76px;
+    height: 64px;
+    object-fit: cover;
+    background: var(--paper-warm);
+    border-radius: 3px;
+  }
+  .course-map-search-result .form-hint { margin: 0 0 6px; overflow-wrap: anywhere; }
 
   /* ── STAT CARDS ── */
   .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
@@ -829,9 +848,16 @@ function autoSaveCurrent() {
 // ═══════════════════════════════════════════
 const COURSE_MAP_DB_NAME = 'golf-scorecard';
 const COURSE_MAP_STORE = 'courseMaps';
+const COURSE_SEARCH_WORKER_KEY = 'golf_course_search_worker';
 let courseMapDbPromise = null;
 let courseMapLookupTimer = null;
 const courseMapObjectUrls = new Map();
+let courseMapSearchResults = [];
+
+function getCourseSearchWorkerUrl() {
+  try { return localStorage.getItem(COURSE_SEARCH_WORKER_KEY) || ''; }
+  catch(e) { return ''; }
+}
 
 function courseMapKey(course) {
   return course.trim().replace(/\s+/g, ' ').toLocaleLowerCase('ko-KR');
@@ -893,14 +919,85 @@ function renderCourseMapPanel(course, entry) {
     ${entry ? `
       <img class="course-map-image" src="${esc(getCourseMapUrl(entry))}" alt="${esc(course)} 홀맵" onclick="showCourseMapViewer(this.src)">
       <p class="form-hint" style="margin-top:6px;margin-bottom:8px">이미지를 누르면 크게 볼 수 있어요.</p>
-    ` : `<p class="form-hint" style="margin-bottom:8px">${key ? '저장된 홀맵이 없어요. 구장 홈페이지에서 받은 이미지를 등록해두세요.' : '구장명을 입력하면 저장된 홀맵을 확인할 수 있어요.'}</p>`}
+    ` : `<p class="form-hint" style="margin-bottom:8px">${key ? '저장된 홀맵이 없어요. 네이버 이미지 검색에서 골라 저장할 수 있어요.' : '구장명을 입력하면 저장된 홀맵을 확인할 수 있어요.'}</p>`}
     ${key ? `
       <div class="flex gap-8">
-        <button type="button" class="btn btn-outline btn-sm" style="flex:1" onclick="document.getElementById('inp-course-map').click()">${entry ? '홀맵 바꾸기' : '홀맵 이미지 등록'}</button>
+        <button type="button" class="btn btn-primary btn-sm" style="flex:1" onclick="searchCourseMaps()">네이버에서 홀맵 검색</button>
+        <button type="button" class="btn btn-outline btn-sm" style="flex:1" onclick="document.getElementById('inp-course-map').click()">이미지 직접 선택</button>
         ${entry ? `<button type="button" class="btn btn-danger btn-sm" onclick="deleteCourseMapForInput()">삭제</button>` : ''}
       </div>
       <input id="inp-course-map" type="file" accept="image/*" style="display:none" onchange="saveCourseMapFromInput(this)">
+      <div id="course-map-search-results" class="course-map-search-results"></div>
     ` : ''}`;
+}
+
+async function searchCourseMaps() {
+  const course = document.getElementById('inp-course')?.value.trim();
+  const workerUrl = getCourseSearchWorkerUrl().replace(/\/+$/, '');
+  const resultsEl = document.getElementById('course-map-search-results');
+  if (!course) { showToast('구장명을 먼저 입력해주세요'); return; }
+  if (!workerUrl) {
+    if (resultsEl) resultsEl.innerHTML = '<p class="form-hint">설정 탭에서 네이버 검색 서버 주소를 먼저 저장해주세요.</p>';
+    return;
+  }
+  if (resultsEl) resultsEl.innerHTML = '<p class="form-hint">네이버에서 홀맵을 검색하고 있어요...</p>';
+  try {
+    const url = new URL(`${workerUrl}/search`);
+    url.searchParams.set('query', `${course} 골프장 홀맵 코스`);
+    const response = await fetch(url.toString());
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '네이버 이미지 검색에 실패했어요');
+    courseMapSearchResults = Array.isArray(data.results) ? data.results : [];
+    if (!resultsEl) return;
+    if (!courseMapSearchResults.length) {
+      resultsEl.innerHTML = '<p class="form-hint">검색 결과가 없어요. 구장명을 확인하거나 직접 이미지를 선택해주세요.</p>';
+      return;
+    }
+    resultsEl.innerHTML = courseMapSearchResults.map((item, index) => `
+      <div class="course-map-search-result">
+        <img src="${esc(item.thumbnail)}" alt="" loading="lazy">
+        <div>
+          <p class="form-hint">${esc(item.title || '홀맵 이미지')}</p>
+          <button type="button" class="btn btn-outline btn-sm" onclick="saveSearchedCourseMap(${index})">이 이미지 저장</button>
+        </div>
+      </div>`).join('');
+  } catch (error) {
+    if (resultsEl) resultsEl.innerHTML = `<p class="form-hint">${esc(error.message || '네이버 검색 서버에 연결할 수 없어요')}</p>`;
+  }
+}
+
+async function saveSearchedCourseMap(index) {
+  const item = courseMapSearchResults[index];
+  const courseInput = document.getElementById('inp-course');
+  const course = courseInput?.value.trim();
+  if (!item || !course) return;
+  const workerUrl = getCourseSearchWorkerUrl().replace(/\/+$/, '');
+  if (!workerUrl) { showToast('설정에서 네이버 검색 서버 주소를 입력해주세요'); return; }
+  try {
+    const url = new URL(`${workerUrl}/image`);
+    url.searchParams.set('token', item.token);
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || '이미지를 내려받지 못했어요');
+    }
+    const blob = await response.blob();
+    if (!blob.type.startsWith('image/') || blob.size > 15 * 1024 * 1024) {
+      throw new Error('이미지 형식이 아니거나 15MB를 초과했어요');
+    }
+    const key = courseMapKey(course);
+    const entry = { key, course, blob, updatedAt: `${Date.now()}-${Math.random()}` };
+    await courseMapRequest('put', entry);
+    const cached = courseMapObjectUrls.get(key);
+    if (cached) {
+      URL.revokeObjectURL(cached.url);
+      courseMapObjectUrls.delete(key);
+    }
+    renderCourseMapPanel(course, entry);
+    showToast(`${course} 홀맵 이미지를 저장했어요`);
+  } catch (error) {
+    showToast(error.message || '홀맵 이미지를 저장하지 못했어요');
+  }
 }
 
 async function loadCourseMapForInput() {
@@ -1916,6 +2013,19 @@ function renderSettings() {
       </div>
     </div>` : ''}
     <div class="card">
+      <div class="card-header"><h3>네이버 홀맵 검색</h3></div>
+      <div class="card-body">
+        <p class="form-hint">검색 결과를 앱 안에서 불러오려면 Cloudflare Worker 주소를 저장하세요. 네이버 인증키는 Worker에 보관되며 이 앱에는 저장하지 않습니다.</p>
+        <div class="form-group">
+          <label class="form-label" for="inp-course-search-worker">검색 서버 주소</label>
+          <input class="form-input" id="inp-course-search-worker" type="url" inputmode="url"
+            placeholder="https://qg-course-search.example.workers.dev" value="${esc(getCourseSearchWorkerUrl())}">
+        </div>
+        <button class="btn btn-outline btn-sm" style="width:100%" onclick="saveCourseSearchWorkerUrl()">검색 서버 저장</button>
+        <p class="form-hint" style="margin:8px 0 0">최초 1회 Cloudflare Worker 배포와 네이버 검색 API 설정이 필요합니다. 자세한 내용은 README를 확인하세요.</p>
+      </div>
+    </div>
+    <div class="card">
       <div class="card-header"><h3>기록 백업</h3></div>
       <div class="card-body">
         <p class="form-hint">기록은 이 폰에만 저장돼요. 가끔 파일로 내보내서 카톡·메일·드라이브 등에 보관해두세요.<br>
@@ -1928,6 +2038,28 @@ function renderSettings() {
         <p class="form-hint" style="margin-top:8px;margin-bottom:0">가져오기는 기존 기록에 합쳐요. 이미 있는 라운드는 건너뛰어요.</p>
       </div>
     </div>`;
+}
+
+function saveCourseSearchWorkerUrl() {
+  const input = document.getElementById('inp-course-search-worker');
+  const value = input.value.trim().replace(/\/+$/, '');
+  try {
+    if (!value) {
+      localStorage.removeItem(COURSE_SEARCH_WORKER_KEY);
+      showToast('네이버 검색 서버 주소를 지웠어요');
+      return;
+    }
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+      showToast('https://로 시작하는 검색 서버 주소를 입력해주세요');
+      return;
+    }
+    localStorage.setItem(COURSE_SEARCH_WORKER_KEY, url.origin + url.pathname.replace(/\/+$/, ''));
+    input.value = url.origin + url.pathname.replace(/\/+$/, '');
+    showToast('네이버 검색 서버 주소를 저장했어요');
+  } catch(e) {
+    showToast('검색 서버 주소를 확인해주세요');
+  }
 }
 
 // ═══════════════════════════════════════════
